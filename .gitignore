@@ -1,0 +1,13 @@
+# virtual env
+.venv/
+
+# data files
+data/*.csv
+
+# python cache
+__pycache__/
+*.pyc
+
+# OS/IDE
+.DS_Store
+.vscode/
