@@ -4,6 +4,9 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import NMF, LatentDirichletAllocation
 from bertopic import BERTopic
+from sklearn.decomposition import TruncatedSVD
+from hdbscan import HDBSCAN
+from sklearn.feature_extraction.text import CountVectorizer
 
 @dataclass
 class TopicResult:
@@ -65,11 +68,18 @@ def run_lda(X_tfidf, vectorizer, n_topics: int, random_state: int) -> TopicResul
     return TopicResult("LDA", topics_df, doc_topics, prevalence_df)
 
 def run_bertopic(texts: list[str], embeddings: np.ndarray, random_state: int) -> TopicResult:
+    reducer = TruncatedSVD(n_components=10, random_state=random_state)
+    hdbscan_model = HDBSCAN(min_cluster_size=15, core_dist_n_jobs=1)
+    vectorizer_model = CountVectorizer(ngram_range=(1, 2), stop_words="english")
+
     topic_model = BERTopic(
         verbose=True,
-        n_gram_range=(1, 2),
+        umap_model=reducer,              # <-- important: replaces UMAP
+        hdbscan_model=hdbscan_model,     # <-- stable clustering
+        vectorizer_model=vectorizer_model,
         calculate_probabilities=False
     )
+
     topics, _ = topic_model.fit_transform(texts, embeddings)
 
     # Topics & Top Words
