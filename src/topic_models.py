@@ -7,6 +7,9 @@ from bertopic import BERTopic
 from sklearn.decomposition import TruncatedSVD
 from hdbscan import HDBSCAN
 from sklearn.feature_extraction.text import CountVectorizer
+from gensim.corpora import Dictionary
+from gensim.models.coherencemodel import CoherenceModel
+
 
 @dataclass
 class TopicResult:
@@ -74,8 +77,8 @@ def run_bertopic(texts: list[str], embeddings: np.ndarray, random_state: int) ->
 
     topic_model = BERTopic(
         verbose=True,
-        umap_model=reducer,              # <-- important: replaces UMAP
-        hdbscan_model=hdbscan_model,     # <-- stable clustering
+        umap_model=reducer,
+        hdbscan_model=hdbscan_model,
         vectorizer_model=vectorizer_model,
         calculate_probabilities=False
     )
@@ -99,7 +102,73 @@ def run_bertopic(texts: list[str], embeddings: np.ndarray, random_state: int) ->
         .rename_axis("topic")
         .reset_index(name="n_docs")
         .sort_values("n_docs", ascending=False)
-    )
+    )   
+    prevalence_df = prevalence_df[prevalence_df["topic"] != -1]
+
     prevalence_df["share"] = prevalence_df["n_docs"] / prevalence_df["n_docs"].sum()
 
     return TopicResult("BERTopic", topics_df, np.array(topics), prevalence_df)
+
+def _components_to_wordlists(components, feature_names, top_n: int = 12) -> list[list[str]]:
+    topic_wordlists = []
+    for weights in components:
+        top_idx = np.argsort(weights)[::-1][:top_n]
+        topic_wordlists.append([feature_names[i] for i in top_idx])
+    return topic_wordlists
+
+def compute_coherence(
+    topic_wordlists: list[list[str]],
+    tokenized_texts: list[list[str]],
+    coherence: str = "c_v",
+) -> float:
+    dictionary = Dictionary(tokenized_texts)
+    cm = CoherenceModel(
+        topics=topic_wordlists,
+        texts=tokenized_texts,
+        dictionary=dictionary,
+        coherence=coherence,
+    )
+    return float(cm.get_coherence())
+
+def scan_k_nmf(
+    X_tfidf,
+    vectorizer,
+    tokenized_texts: list[list[str]],
+    k_values: list[int],
+    random_state: int,
+    top_n: int,
+    coherence: str,
+) -> pd.DataFrame:
+    rows = []
+    feat = vectorizer.get_feature_names_out()
+    for k in k_values:
+        nmf = NMF(n_components=k, random_state=random_state, init="nndsvda", max_iter=300)
+        nmf.fit(X_tfidf)
+        wordlists = _components_to_wordlists(nmf.components_, feat, top_n=top_n)
+        coh = compute_coherence(wordlists, tokenized_texts, coherence=coherence)
+        rows.append({"model": "NMF", "k": k, "coherence": coh})
+    return pd.DataFrame(rows)
+
+def scan_k_lda(
+    X_tfidf,
+    vectorizer,
+    tokenized_texts: list[list[str]],
+    k_values: list[int],
+    random_state: int,
+    top_n: int,
+    coherence: str,
+) -> pd.DataFrame:
+    rows = []
+    feat = vectorizer.get_feature_names_out()
+    for k in k_values:
+        lda = LatentDirichletAllocation(
+            n_components=k,
+            random_state=random_state,
+            learning_method="batch",
+            max_iter=20,
+        )
+        lda.fit(X_tfidf)
+        wordlists = _components_to_wordlists(lda.components_, feat, top_n=top_n)
+        coh = compute_coherence(wordlists, tokenized_texts, coherence=coherence)
+        rows.append({"model": "LDA", "k": k, "coherence": coh})
+    return pd.DataFrame(rows)

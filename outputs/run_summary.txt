@@ -1,0 +1,1 @@
+{'n_documents_used': 20000, 'tfidf_shape': [20000, 48547], 'sbert_embedding_shape': [20000, 384], 'best_k_nmf': 18, 'best_k_lda': 15, 'note': 'TF-IDF sparse & interpretable; SBERT dense & semantisch (Synonyme/Paraphrasen).'}

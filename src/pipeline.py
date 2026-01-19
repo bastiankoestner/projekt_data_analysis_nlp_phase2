@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 import argparse
 from pathlib import Path
+
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -13,13 +15,16 @@ from .config import (
     TFIDF_MIN_DF,
     TFIDF_MAX_DF,
     TFIDF_MAX_FEATURES,
-    N_TOPICS_NMF,
-    N_TOPICS_LDA,
     SBERT_MODEL_NAME,
+    TOPIC_K_CANDIDATES,
+    COHERENCE_METRIC,
+    TOP_N_WORDS,
 )
+
 from .preprocessing import basic_clean, spacy_lemmatize
 from .vectorization import build_tfidf, build_sbert_embeddings
-from .topic_models import run_nmf, run_lda, run_bertopic
+from .topic_models import run_nmf, run_lda, run_bertopic, scan_k_nmf, scan_k_lda
+
 
 def stratified_sample(df: pd.DataFrame, group_col: str, n: int, random_state: int) -> pd.DataFrame:
     if n >= len(df):
@@ -40,6 +45,7 @@ def stratified_sample(df: pd.DataFrame, group_col: str, n: int, random_state: in
         out = out.sample(n=n, random_state=random_state)
     return out
 
+
 def save_prevalence_plot(prevalence_df: pd.DataFrame, title: str, outpath: Path, top_k: int = 10):
     top = prevalence_df.head(top_k).copy()
     plt.figure()
@@ -50,6 +56,7 @@ def save_prevalence_plot(prevalence_df: pd.DataFrame, title: str, outpath: Path,
     plt.tight_layout()
     plt.savefig(outpath, dpi=200)
     plt.close()
+
 
 def main(input_csv: str, outdir: str):
     outdir_path = Path(outdir)
@@ -83,6 +90,7 @@ def main(input_csv: str, outdir: str):
     df.to_csv(outdir_path / "cleaned_sample.csv", index=False)
 
     texts = df["clean_text"].tolist()
+    tokenized_texts = [t.split() for t in texts]
 
     # 6) Vectorization A: TF-IDF
     X_tfidf, tfidf_vec = build_tfidf(
@@ -93,9 +101,48 @@ def main(input_csv: str, outdir: str):
         max_features=TFIDF_MAX_FEATURES,
     )
 
-    # 7) Topic models on TF-IDF: NMF + LDA
-    nmf_res = run_nmf(X_tfidf, tfidf_vec, n_topics=N_TOPICS_NMF, random_state=RANDOM_STATE)
-    lda_res = run_lda(X_tfidf, tfidf_vec, n_topics=N_TOPICS_LDA, random_state=RANDOM_STATE)
+    # 7) K-Auswahl via Coherence (Tutor-Feedback)
+    nmf_k_df = scan_k_nmf(
+        X_tfidf,
+        tfidf_vec,
+        tokenized_texts,
+        k_values=TOPIC_K_CANDIDATES,
+        random_state=RANDOM_STATE,
+        top_n=TOP_N_WORDS,
+        coherence=COHERENCE_METRIC,
+    )
+
+    lda_k_df = scan_k_lda(
+        X_tfidf,
+        tfidf_vec,
+        tokenized_texts,
+        k_values=TOPIC_K_CANDIDATES,
+        random_state=RANDOM_STATE,
+        top_n=TOP_N_WORDS,
+        coherence=COHERENCE_METRIC,
+    )
+
+    coh_df = pd.concat([nmf_k_df, lda_k_df], ignore_index=True)
+    coh_df.to_csv(outdir_path / "coherence_scan.csv", index=False)
+
+    best_k_nmf = int(nmf_k_df.sort_values("coherence", ascending=False).iloc[0]["k"])
+    best_k_lda = int(lda_k_df.sort_values("coherence", ascending=False).iloc[0]["k"])
+
+
+    plt.figure()
+    for model_name, part in coh_df.groupby("model"):
+        plt.plot(part["k"], part["coherence"], marker="o", label=model_name)
+    plt.xlabel("K (n_topics)")
+    plt.ylabel(f"Coherence ({COHERENCE_METRIC})")
+    plt.title("Topic Count Selection via Coherence")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(outdir_path / "coherence_vs_k.png", dpi=200)
+    plt.close()
+
+    # 8) Finales Training mit best_k
+    nmf_res = run_nmf(X_tfidf, tfidf_vec, n_topics=best_k_nmf, random_state=RANDOM_STATE)
+    lda_res = run_lda(X_tfidf, tfidf_vec, n_topics=best_k_lda, random_state=RANDOM_STATE)
 
     nmf_res.topics_df.to_csv(outdir_path / "topics_nmf.csv", index=False)
     lda_res.topics_df.to_csv(outdir_path / "topics_lda.csv", index=False)
@@ -105,25 +152,30 @@ def main(input_csv: str, outdir: str):
     save_prevalence_plot(nmf_res.prevalence_df, "NMF Topic Prevalence (Top 10)", outdir_path / "prevalence_nmf.png")
     save_prevalence_plot(lda_res.prevalence_df, "LDA Topic Prevalence (Top 10)", outdir_path / "prevalence_lda.png")
 
-    # 8) Vectorization B: Sentence-BERT Embeddings
+    # 9) Vectorization B: Sentence-BERT Embeddings
     embeddings = build_sbert_embeddings(texts, model_name=SBERT_MODEL_NAME)
 
-    # 9) BERTopic
+    # 10) BERTopic
     bert_res = run_bertopic(texts, embeddings, random_state=RANDOM_STATE)
     bert_res.topics_df.to_csv(outdir_path / "topics_bertopic.csv", index=False)
     bert_res.prevalence_df.to_csv(outdir_path / "prevalence_bertopic.csv", index=False)
-    save_prevalence_plot(bert_res.prevalence_df, "BERTopic Prevalence (Top 10)", outdir_path / "prevalence_bertopic.png")
+    save_prevalence_plot(
+        bert_res.prevalence_df, "BERTopic Prevalence (Top 10)", outdir_path / "prevalence_bertopic.png"
+    )
 
-    # 10) Mini-Vergleich TF-IDF vs SBERT
+    # 11) Vergleich TF-IDF vs SBERT
     summary = {
         "n_documents_used": len(df),
         "tfidf_shape": [int(X_tfidf.shape[0]), int(X_tfidf.shape[1])],
         "sbert_embedding_shape": [int(embeddings.shape[0]), int(embeddings.shape[1])],
-        "note": "TF-IDF sparse & interpretable; SBERT dense & semantisch (Synonyme/Paraphrasen)."
+        "best_k_nmf": best_k_nmf,
+        "best_k_lda": best_k_lda,
+        "note": "TF-IDF sparse & interpretable; SBERT dense & semantisch (Synonyme/Paraphrasen).",
     }
     (outdir_path / "run_summary.txt").write_text(str(summary), encoding="utf-8")
 
     print("Done. Outputs written to:", outdir_path)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
